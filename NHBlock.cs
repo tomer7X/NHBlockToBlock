@@ -16,7 +16,7 @@ namespace NHBlockToBlock
         private const double CellHeight = 5000;
         private const int ColumnsPerRow = 10;
 
-        [CommandMethod("NHBlock")]
+        [CommandMethod("NHBlockToBlock")]
         public void NHBlock()
         {
             var doc = Application.DocumentManager.MdiActiveDocument;
