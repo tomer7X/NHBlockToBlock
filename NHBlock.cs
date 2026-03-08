@@ -75,78 +75,102 @@ namespace NHBlockToBlock
                 tr.Commit();
             }
 
-            // --- Step 3: for each distinct name, ask user to pick the -Z template ---
-            // Key = source block name, Value = ObjectId of the -Z template
+            // --- Step 3: select allowed template blocks (both source-type and -Z) ---
+            ed.WriteMessage("\nSelect allowed template blocks (include both e.g. \"P-1\" and \"P-1-Z\"): ");
+            var psrTemplates = ed.GetSelection();
+            if (psrTemplates.Status != PromptStatus.OK)
+            {
+                ed.WriteMessage("\nCancelled. Aborting.");
+                return;
+            }
+
+            // Key = block name, Value = first ObjectId seen for that name
+            var allowedPool = new Dictionary<string, ObjectId>(StringComparer.OrdinalIgnoreCase);
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                foreach (var selObj in psrTemplates.Value)
+                {
+                    var so = (SelectedObject)selObj;
+                    if (!so.ObjectId.IsValid) continue;
+                    var br = tr.GetObject(so.ObjectId, OpenMode.ForRead) as BlockReference;
+                    if (br == null) continue;
+                    string name = GetBlockEffectiveName(tr, br);
+                    if (!allowedPool.ContainsKey(name))
+                        allowedPool[name] = so.ObjectId;
+                }
+                tr.Commit();
+            }
+
+            // --- Step 3b: resolve valid pairs and validate compatibility ---
+            // Key = source block name, Value = ObjectId of the -Z template block reference
             var templateIds = new Dictionary<string, ObjectId>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var name in groupedSources.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
             {
                 string zName = $"{name}-Z";
-                var peo = new PromptEntityOptions($"\nSelect block template \"{zName}\": ");
-                peo.SetRejectMessage("\nOnly block references are allowed.");
-                peo.AddAllowedClass(typeof(BlockReference), exactMatch: false);
 
-                var per = ed.GetEntity(peo);
-                if (per.Status != PromptStatus.OK)
+                bool hasSrc = allowedPool.ContainsKey(name);
+                bool hasZ   = allowedPool.ContainsKey(zName);
+
+                if (!hasSrc || !hasZ)
                 {
-                    ed.WriteMessage($"\nCancelled. Aborting.");
-                    return;
+                    if (!hasSrc && !hasZ)
+                        ed.WriteMessage($"\nNo template blocks found for \"{name}\" (missing \"{name}\" and \"{zName}\") — skipping.");
+                    else if (!hasSrc)
+                        ed.WriteMessage($"\nNo template block found for \"{name}\" (missing \"{name}\") — skipping.");
+                    else
+                        ed.WriteMessage($"\nNo template block found for \"{name}\" (missing \"{zName}\") — skipping.");
+                    continue;
                 }
 
                 using (var tr = db.TransactionManager.StartTransaction())
                 {
-                    var brZ = (BlockReference)tr.GetObject(per.ObjectId, OpenMode.ForRead);
-                    string selectedName = GetBlockEffectiveName(tr, brZ);
+                    var brZ = (BlockReference)tr.GetObject(allowedPool[zName], OpenMode.ForRead);
 
-                    if (!string.Equals(selectedName, zName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        ed.WriteMessage($"\nExpected \"{zName}\" but selected \"{selectedName}\". Aborting.");
-                        tr.Commit();
-                        return;
-                    }
-
-                    // Validate compatibility: source attrs/props must match -Z attrs/props (minus Quantity)
                     var sampleSource = groupedSources[name][0];
-
                     var srcAttrNames = new HashSet<string>(sampleSource.Attributes.Keys, StringComparer.OrdinalIgnoreCase);
                     var srcPropNames = new HashSet<string>(sampleSource.DynamicProps.Keys, StringComparer.OrdinalIgnoreCase);
 
                     var zAttrNames = CollectAttributeNames(tr, brZ);
                     var zPropNames = CollectDynamicPropertyNames(brZ);
 
-                    // Remove Quantity from -Z side for comparison
                     var zAttrNamesForCompare = new HashSet<string>(zAttrNames, StringComparer.OrdinalIgnoreCase);
                     zAttrNamesForCompare.Remove(QuantityTag);
 
                     if (!srcAttrNames.SetEquals(zAttrNamesForCompare) || !srcPropNames.SetEquals(zPropNames))
                     {
-                        ed.WriteMessage($"\n\"{name}\" and \"{zName}\" do not have matching attributes/properties.");
+                        ed.WriteMessage($"\n\"{name}\" and \"{zName}\" do not have matching attributes/properties — skipping.");
 
-                        var missingInZ = srcAttrNames.Except(zAttrNamesForCompare, StringComparer.OrdinalIgnoreCase).ToList();
-                        var extraInZ = zAttrNamesForCompare.Except(srcAttrNames, StringComparer.OrdinalIgnoreCase).ToList();
+                        var missingInZ    = srcAttrNames.Except(zAttrNamesForCompare, StringComparer.OrdinalIgnoreCase).ToList();
+                        var extraInZ      = zAttrNamesForCompare.Except(srcAttrNames, StringComparer.OrdinalIgnoreCase).ToList();
                         var missingPropsInZ = srcPropNames.Except(zPropNames, StringComparer.OrdinalIgnoreCase).ToList();
-                        var extraPropsInZ = zPropNames.Except(srcPropNames, StringComparer.OrdinalIgnoreCase).ToList();
+                        var extraPropsInZ   = zPropNames.Except(srcPropNames, StringComparer.OrdinalIgnoreCase).ToList();
 
-                        if (missingInZ.Count > 0) ed.WriteMessage($"\n  Attributes in \"{name}\" but not in \"{zName}\": {string.Join(", ", missingInZ)}");
-                        if (extraInZ.Count > 0) ed.WriteMessage($"\n  Attributes in \"{zName}\" but not in \"{name}\": {string.Join(", ", extraInZ)}");
+                        if (missingInZ.Count > 0)    ed.WriteMessage($"\n  Attributes in \"{name}\" but not in \"{zName}\": {string.Join(", ", missingInZ)}");
+                        if (extraInZ.Count > 0)      ed.WriteMessage($"\n  Attributes in \"{zName}\" but not in \"{name}\": {string.Join(", ", extraInZ)}");
                         if (missingPropsInZ.Count > 0) ed.WriteMessage($"\n  Dynamic props in \"{name}\" but not in \"{zName}\": {string.Join(", ", missingPropsInZ)}");
-                        if (extraPropsInZ.Count > 0) ed.WriteMessage($"\n  Dynamic props in \"{zName}\" but not in \"{name}\": {string.Join(", ", extraPropsInZ)}");
+                        if (extraPropsInZ.Count > 0)   ed.WriteMessage($"\n  Dynamic props in \"{zName}\" but not in \"{name}\": {string.Join(", ", extraPropsInZ)}");
 
-                        ed.WriteMessage("\nAborting.");
                         tr.Commit();
-                        return;
+                        continue;
                     }
 
                     if (!zAttrNames.Contains(QuantityTag))
                     {
-                        ed.WriteMessage($"\n\"{zName}\" is missing the \"{QuantityTag}\" attribute. Aborting.");
+                        ed.WriteMessage($"\n\"{zName}\" is missing the \"{QuantityTag}\" attribute — skipping.");
                         tr.Commit();
-                        return;
+                        continue;
                     }
 
-                    templateIds[name] = per.ObjectId;
+                    templateIds[name] = allowedPool[zName];
                     tr.Commit();
                 }
+            }
+
+            if (templateIds.Count == 0)
+            {
+                ed.WriteMessage("\nNo valid block pairs found. Aborting.");
+                return;
             }
 
             // --- Step 3b: select the NET block ---
@@ -181,7 +205,7 @@ namespace NHBlockToBlock
                 var ms = (BlockTableRecord)tr.GetObject(
                     SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
 
-                foreach (var kvp in groupedSources)
+                foreach (var kvp in groupedSources.Where(k => templateIds.ContainsKey(k.Key)))
                 {
                     string srcName = kvp.Key;
                     var sources = kvp.Value;
