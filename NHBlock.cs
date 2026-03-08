@@ -12,6 +12,7 @@ namespace NHBlockToBlock
     public class Commands
     {
         private const string QuantityTag = "Quantity";
+        private const string NameTag = "NAME";
         private const double CellWidth = 10000;
         private const double CellHeight = 5000;
         private const int ColumnsPerRow = 10;
@@ -64,6 +65,7 @@ namespace NHBlockToBlock
 
                     var data = new SourceBlockData
                     {
+                        SourceId = id,
                         Attributes = CollectAttributeValues(tr, br),
                         DynamicProps = CollectDynamicPropertyValues(br)
                     };
@@ -200,6 +202,10 @@ namespace NHBlockToBlock
             // --- Step 4: for each group, deduplicate by fingerprint and create -Z blocks ---
             int cellIndex = 0;
 
+            // KEY = NAME attribute value, VALUE = list of (created -Z ObjectId, source ObjectIds in that fingerprint group)
+            // Used after creation to detect NAME conflicts and draw revclouds.
+            var nameToCreated = new Dictionary<string, List<(ObjectId ZBlockId, List<ObjectId> SourceIds)>>(StringComparer.OrdinalIgnoreCase);
+
             using (var tr = db.TransactionManager.StartTransaction())
             {
                 var ms = (BlockTableRecord)tr.GetObject(
@@ -299,6 +305,14 @@ namespace NHBlockToBlock
                         }
 
                         ed.WriteMessage($"\nCreated \"{srcName}-Z\" (Quantity={quantity}) at cell [{row},{col}] ({cellPos.X:0.##}, {cellPos.Y:0.##})");
+
+                        // Track NAME value → created -Z block for conflict detection
+                        if (representative.Attributes.TryGetValue(NameTag, out string nameVal) && !string.IsNullOrWhiteSpace(nameVal))
+                        {
+                            if (!nameToCreated.ContainsKey(nameVal))
+                                nameToCreated[nameVal] = new List<(ObjectId, List<ObjectId>)>();
+                            nameToCreated[nameVal].Add((newBr.ObjectId, group.Select(s => s.SourceId).ToList()));
+                        }
                     }
                 }
 
@@ -306,6 +320,51 @@ namespace NHBlockToBlock
             }
 
             ed.WriteMessage($"\n{cellIndex} block(s) placed in the NET grid.");
+
+            // --- Step 5: draw red revclouds around conflicting blocks (same NAME, different values) ---
+            var conflictingNames = nameToCreated.Where(kv => kv.Value.Count > 1).ToList();
+            if (conflictingNames.Count > 0)
+            {
+                using (var tr = db.TransactionManager.StartTransaction())
+                {
+                    var ms = (BlockTableRecord)tr.GetObject(
+                        SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+
+                    foreach (var kv in conflictingNames)
+                    {
+                        string nameVal = kv.Key;
+                        var entries = kv.Value;
+
+                        ed.WriteMessage($"\nNAME conflict detected for \"{nameVal}\" — {entries.Count} distinct -Z blocks share this name. Drawing revclouds.");
+
+                        // Collect all block IDs that need a revcloud: the -Z blocks + their source blocks
+                        var allConflictIds = new List<ObjectId>();
+                        foreach (var (zId, srcIds) in entries)
+                        {
+                            allConflictIds.Add(zId);
+                            allConflictIds.AddRange(srcIds);
+                        }
+
+                        foreach (var blockId in allConflictIds)
+                        {
+                            if (!blockId.IsValid) continue;
+                            var br = tr.GetObject(blockId, OpenMode.ForRead) as BlockReference;
+                            if (br == null) continue;
+
+                            Extents3d ext;
+                            try { ext = br.GeometricExtents; }
+                            catch { continue; }
+
+                            DrawRevcloud(tr, ms, ext, db);
+                        }
+                    }
+
+                    tr.Commit();
+                }
+
+                ed.WriteMessage($"\nRevclouds drawn for {conflictingNames.Count} conflicting NAME value(s).");
+            }
+
             ed.WriteMessage("\n--- NHBlock complete ---\n");
         }
 
@@ -313,6 +372,7 @@ namespace NHBlockToBlock
 
         private class SourceBlockData
         {
+            public ObjectId SourceId { get; set; }
             public Dictionary<string, string> Attributes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
             public Dictionary<string, object> DynamicProps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -448,6 +508,77 @@ namespace NHBlockToBlock
 
         private static bool IsIgnoredName(string name)
             => name.StartsWith(IgnoredAttributePrefix, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Draws a red revcloud (closed polyline with arc bulges) around the given extents,
+        /// with a small padding. Arc chord length is scaled to the extents size.
+        /// </summary>
+        private static void DrawRevcloud(Transaction tr, BlockTableRecord ms, Extents3d ext, Database db)
+        {
+            const double paddingFactor = 0.05; // 5% padding on each side
+            const double minArcChord = 50.0;
+
+            double w = ext.MaxPoint.X - ext.MinPoint.X;
+            double h = ext.MaxPoint.Y - ext.MinPoint.Y;
+
+            double pad = Math.Max(Math.Max(w, h) * paddingFactor, minArcChord * 0.5);
+            double x0 = ext.MinPoint.X - pad;
+            double y0 = ext.MinPoint.Y - pad;
+            double x1 = ext.MaxPoint.X + pad;
+            double y1 = ext.MaxPoint.Y + pad;
+
+            // Arc chord length: roughly 1/8 of the perimeter, clamped to a sensible range
+            double perimeter = 2.0 * ((x1 - x0) + (y1 - y0));
+            double chord = Math.Max(minArcChord, Math.Min(perimeter / 12.0, Math.Max(w, h) * 0.3));
+
+            // Bulge for a semicircle-like arc bump (bulge = tan(theta/4), theta = arc angle)
+            // For a convex outward bump: use negative bulge (arc bows outward relative to polyline direction)
+            double bulge = -Math.Tan(Math.PI / 8.0); // 45° arc per chord segment, bumps outward
+
+            var pts = new List<(double X, double Y)>();
+
+            // Bottom edge: left to right
+            AddSegments(pts, x0, y0, x1, y0, chord);
+            // Right edge: bottom to top
+            AddSegments(pts, x1, y0, x1, y1, chord);
+            // Top edge: right to left
+            AddSegments(pts, x1, y1, x0, y1, chord);
+            // Left edge: top to bottom
+            AddSegments(pts, x0, y1, x0, y0, chord);
+
+            if (pts.Count < 2) return;
+
+            var pline = new Polyline();
+            pline.Normal = Vector3d.ZAxis;
+            pline.Elevation = ext.MinPoint.Z;
+            pline.Closed = true;
+            pline.ColorIndex = 1; // red
+
+            for (int i = 0; i < pts.Count; i++)
+                pline.AddVertexAt(i, new Point2d(pts[i].X, pts[i].Y), bulge, 0, 0);
+
+            ms.AppendEntity(pline);
+            tr.AddNewlyCreatedDBObject(pline, true);
+        }
+
+        /// <summary>
+        /// Divides the segment from (x0,y0) to (x1,y1) into sub-segments of approximately
+        /// <paramref name="chord"/> length and appends the start points (not the final endpoint).
+        /// </summary>
+        private static void AddSegments(List<(double X, double Y)> pts, double x0, double y0, double x1, double y1, double chord)
+        {
+            double dx = x1 - x0;
+            double dy = y1 - y0;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            if (len < 1e-9) return;
+
+            int n = Math.Max(1, (int)Math.Round(len / chord));
+            double stepX = dx / n;
+            double stepY = dy / n;
+
+            for (int i = 0; i < n; i++)
+                pts.Add((x0 + i * stepX, y0 + i * stepY));
+        }
 
         private static string ValueToString(object v)
         {
