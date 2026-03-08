@@ -213,7 +213,12 @@ namespace NHBlockToBlock
                         cellIndex++;
 
                         // Create new -Z block reference
-                        var newBr = new BlockReference(cellPos, templateBr.BlockTableRecord);
+                        // Use DynamicBlockTableRecord so dynamic properties are available on the new instance
+                        var btrId = templateBr.IsDynamicBlock
+                            ? templateBr.DynamicBlockTableRecord
+                            : templateBr.BlockTableRecord;
+
+                        var newBr = new BlockReference(cellPos, btrId);
                         newBr.ScaleFactors = templateBr.ScaleFactors;
                         newBr.Rotation = templateBr.Rotation;
                         newBr.Normal = templateBr.Normal;
@@ -222,7 +227,7 @@ namespace NHBlockToBlock
                         tr.AddNewlyCreatedDBObject(newBr, true);
 
                         // Add attributes from the BTR definition
-                        var btr = (BlockTableRecord)tr.GetObject(templateBr.BlockTableRecord, OpenMode.ForRead);
+                        var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                         foreach (ObjectId entId in btr)
                         {
                             var dbObj = tr.GetObject(entId, OpenMode.ForRead);
