@@ -13,8 +13,6 @@ namespace NHBlockToBlock
     {
         private const string QuantityTag = "Quantity";
         private const string NameTag = "NAME";
-        private const double CellWidth = 10000;
-        private const double CellHeight = 5000;
         private const int ColumnsPerRow = 10;
         private const string IgnoredAttributePrefix = "I_";
 
@@ -188,16 +186,20 @@ namespace NHBlockToBlock
             }
 
             Point3d netOrigin;
+            double cellWidth;
+            double cellHeight;
             using (var tr = db.TransactionManager.StartTransaction())
             {
                 var netBr = (BlockReference)tr.GetObject(perNet.ObjectId, OpenMode.ForRead);
                 // NET origin = top-left corner of the grid (left edge X, top edge Y)
                 var extents = netBr.GeometricExtents;
                 netOrigin = new Point3d(extents.MinPoint.X, extents.MaxPoint.Y, extents.MinPoint.Z);
+                cellWidth  = (extents.MaxPoint.X - extents.MinPoint.X) / ColumnsPerRow;
+                cellHeight = cellWidth / 2.0;
                 tr.Commit();
             }
 
-            ed.WriteMessage($"\nNET origin: ({netOrigin.X:0.##}, {netOrigin.Y:0.##})");
+            ed.WriteMessage($"\nNET origin: ({netOrigin.X:0.##}, {netOrigin.Y:0.##}), cell size: {cellWidth:0.##} x {cellHeight:0.##}");
 
             // --- Step 4: for each group, deduplicate by fingerprint and create -Z blocks ---
             int cellIndex = 0;
@@ -237,8 +239,8 @@ namespace NHBlockToBlock
                         // Calculate grid cell position (center of cell)
                         int col = cellIndex % ColumnsPerRow;
                         int row = cellIndex / ColumnsPerRow;
-                        double cellX = netOrigin.X + (col * CellWidth) + (CellWidth / 2.0);
-                        double cellY = netOrigin.Y - (row * CellHeight) - (CellHeight / 2.0);
+                        double cellX = netOrigin.X + (col * cellWidth) + (cellWidth / 2.0);
+                        double cellY = netOrigin.Y - (row * cellHeight) - (cellHeight / 2.0);
                         var cellPos = new Point3d(cellX, cellY, netOrigin.Z);
                         cellIndex++;
 
