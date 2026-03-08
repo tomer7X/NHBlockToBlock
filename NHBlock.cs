@@ -15,6 +15,7 @@ namespace NHBlockToBlock
         private const double CellWidth = 10000;
         private const double CellHeight = 5000;
         private const int ColumnsPerRow = 10;
+        private const string IgnoredAttributePrefix = "I_";
 
         [CommandMethod("NHBlockToBlock")]
         public void NHBlock()
@@ -225,7 +226,8 @@ namespace NHBlockToBlock
                         foreach (ObjectId entId in btr)
                         {
                             var dbObj = tr.GetObject(entId, OpenMode.ForRead);
-                            if (dbObj is AttributeDefinition attDef && !attDef.Constant)
+                            if (dbObj is AttributeDefinition attDef && !attDef.Constant
+                                && !attDef.Tag.StartsWith(IgnoredAttributePrefix, StringComparison.OrdinalIgnoreCase))
                             {
                                 var attRef = new AttributeReference();
                                 attRef.SetAttributeFromBlock(attDef, newBr.BlockTransform);
@@ -328,7 +330,7 @@ namespace NHBlockToBlock
             {
                 if (!attId.IsValid) continue;
                 var obj = tr.GetObject(attId, OpenMode.ForRead, false);
-                if (obj is AttributeReference ar && !string.IsNullOrWhiteSpace(ar.Tag))
+                if (obj is AttributeReference ar && !string.IsNullOrWhiteSpace(ar.Tag) && !IsIgnoredName(ar.Tag))
                     dict[ar.Tag] = ar.TextString ?? "";
             }
 
@@ -358,7 +360,7 @@ namespace NHBlockToBlock
             {
                 if (p.ReadOnly) continue;
                 if (string.Equals(p.PropertyName, "Origin", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.IsNullOrWhiteSpace(p.PropertyName))
+                if (!string.IsNullOrWhiteSpace(p.PropertyName) && !IsIgnoredName(p.PropertyName))
                 {
                     try { dict[p.PropertyName] = p.Value; }
                     catch { }
@@ -378,7 +380,7 @@ namespace NHBlockToBlock
             {
                 if (!attId.IsValid) continue;
                 var obj = tr.GetObject(attId, OpenMode.ForRead, false);
-                if (obj is AttributeReference ar && !string.IsNullOrWhiteSpace(ar.Tag))
+                if (obj is AttributeReference ar && !string.IsNullOrWhiteSpace(ar.Tag) && !IsIgnoredName(ar.Tag))
                     names.Add(ar.Tag);
             }
 
@@ -408,12 +410,15 @@ namespace NHBlockToBlock
             {
                 if (p.ReadOnly) continue;
                 if (string.Equals(p.PropertyName, "Origin", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.IsNullOrWhiteSpace(p.PropertyName))
+                if (!string.IsNullOrWhiteSpace(p.PropertyName) && !IsIgnoredName(p.PropertyName))
                     names.Add(p.PropertyName);
             }
 
             return names;
         }
+
+        private static bool IsIgnoredName(string name)
+            => name.StartsWith(IgnoredAttributePrefix, StringComparison.OrdinalIgnoreCase);
 
         private static string ValueToString(object v)
         {
